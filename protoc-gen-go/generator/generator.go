@@ -30,9 +30,9 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 /*
-	The code generator for the plugin for the Google protocol buffer compiler.
-	It generates Go code from the protocol buffer description files read by the
-	main routine.
+   The code generator for the plugin for the Google protocol buffer compiler.
+   It generates Go code from the protocol buffer description files read by the
+   main routine.
 */
 package generator
 
@@ -1712,6 +1712,7 @@ var methodNames = [...]string{
 	"ExtensionRangeArray",
 	"ExtensionMap",
 	"Descriptor",
+	"LogFields",
 }
 
 // Names of messages in the `google.protobuf` package for which
@@ -1926,6 +1927,74 @@ func (g *Generator) generateMessage(message *Descriptor) {
 	if message.file.GetPackage() == "google.protobuf" && wellKnownTypes[message.GetName()] {
 		g.P("func (*", ccTypeName, `) XXX_WellKnownType() string { return "`, message.GetName(), `" }`)
 	}
+
+	// Converts the Message to a set of logrus Fields.
+	g.P("func (m *", ccTypeName, ") LogFields() map[string]interface{} { return m.LogFieldsWithOptions(\"\") }")
+	g.P("func (m *", ccTypeName, ") LogFieldsWithOptions(rootName string) map[string]interface{} {")
+	g.In()
+	g.P("entries := map[string]interface{} {}")
+	g.In()
+	for _, field := range message.Field {
+		fieldAccessor := fmt.Sprintf("m.%s", CamelCase(*field.Name))
+		fieldGetter := fmt.Sprintf("m.%s()", fieldGetterNames[field])
+
+		// We are omitting byte values from being printed.
+		if *field.Type == descriptor.FieldDescriptorProto_TYPE_BYTES {
+			g.P("entries[rootName + \"", field.Name, "\"] = fmt.Sprintf(\"bytes(%d)\", len(", fieldGetter, "))")
+			continue
+		}
+
+		g.P("if ", fieldAccessor, " != nil { ")
+		if *field.Type != descriptor.FieldDescriptorProto_TYPE_MESSAGE {
+			if *field.Label == descriptor.FieldDescriptorProto_LABEL_REPEATED {
+				g.P("for index, val := range ", fieldAccessor, " {")
+				g.In()
+				g.P("entryName := fmt.Sprintf(\"%s", field.Name, "[%d]\", rootName, index)")
+				g.P("entries[entryName] = val")
+				g.Out()
+				g.P("}")
+			} else {
+				g.P("entries[rootName + \"", field.Name, "\"] = ", fieldGetter)
+			}
+		}
+		g.P("}")
+	}
+	g.Out()
+
+	for _, field := range message.Field {
+		fieldAccessor := fmt.Sprintf("m.%s", CamelCase(*field.Name))
+		g.P("if ", fieldAccessor, " != nil { ")
+		if *field.Type == descriptor.FieldDescriptorProto_TYPE_MESSAGE {
+			g.P("{")
+			g.In()
+			if *field.Label == descriptor.FieldDescriptorProto_LABEL_REPEATED {
+				g.P("for index, val := range ", fieldAccessor, " {")
+				g.In()
+				g.P("rootName := fmt.Sprintf(\"", field.Name, "[%d].\", index)")
+				g.P("subEntries := val.LogFieldsWithOptions(rootName)")
+				g.P("for subEntryName, subEntryValue := range subEntries {")
+				g.In()
+				g.P("entries[subEntryName] = subEntryValue")
+				g.Out()
+				g.P("}")
+				g.Out()
+				g.P("}")
+			} else {
+				g.P("subEntries := ", fieldAccessor, ".LogFieldsWithOptions(\"", field.Name, ".\")")
+				g.P("for subEntryName, subEntryValue := range subEntries {")
+				g.In()
+				g.P("entries[subEntryName] = subEntryValue")
+				g.Out()
+				g.P("}")
+			}
+			g.Out()
+			g.P("}")
+		}
+		g.P("}")
+	}
+	g.P("return entries")
+	g.Out()
+	g.P("}")
 
 	// Extension support methods
 	var hasExtensions, isMessageSet bool
